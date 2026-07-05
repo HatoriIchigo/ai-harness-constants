@@ -76,10 +76,10 @@ files:
 ```sh
 dotnet build ai-harness-constants/ai-harness-constants/ai-harness-constants.csproj -c Release
 
-# 配布物は lib のみ: プラグイン DLL・TreeSitter.dll（マネージド）・.deps.json を lib/ へ。
+# 配布物は lib の管理 DLL のみ: プラグイン DLL・TreeSitter.dll（マネージド）を lib/ へ。
+# .deps.json は不要（host の ALC が lib 直下を直接プローブして TreeSitter.dll を解決する）。
 BIN=ai-harness-constants/ai-harness-constants/bin/Release/net10.0
 cp "$BIN/ai-harness-constants.dll"       <配置先>/lib/
-cp "$BIN/ai-harness-constants.deps.json" <配置先>/lib/
 cp "$BIN/TreeSitter.dll"                 <配置先>/lib/
 # ネイティブ grammar（tree-sitter-*.dll）は**プラグイン側では配置しない**。汎用（どの tree-sitter
 # プラグインでも同一）ゆえ host（ai-harness-main）のリリースに runtimes/<rid>/native として同梱され、
