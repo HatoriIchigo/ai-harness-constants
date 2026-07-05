@@ -76,15 +76,16 @@ files:
 ```sh
 dotnet build ai-harness-constants/ai-harness-constants/ai-harness-constants.csproj -c Release
 
-# プラグイン DLL・TreeSitter.dll（マネージド）と .deps.json は lib/ へ。
+# 配布物は lib のみ: プラグイン DLL・TreeSitter.dll（マネージド）・.deps.json を lib/ へ。
 BIN=ai-harness-constants/ai-harness-constants/bin/Release/net10.0
 cp "$BIN/ai-harness-constants.dll"       <配置先>/lib/
 cp "$BIN/ai-harness-constants.deps.json" <配置先>/lib/
 cp "$BIN/TreeSitter.dll"                 <配置先>/lib/
-# ネイティブ grammar（tree-sitter-*.dll）は**実行体（ai-harness-main）の隣**の runtimes/ へ。
-# TreeSitter.DotNet は grammar を「ベア名」で NativeLibrary.Load するため .deps.json/ALC では解決できず、
-# host が起動時に runtimes/<rid>/native をフルパスで事前ロードして解決する（lib/ 側は探索されない）。
-cp -r "$BIN/runtimes"                    <配置先>/runtimes
+# ネイティブ grammar（tree-sitter-*.dll）は**プラグイン側では配置しない**。汎用（どの tree-sitter
+# プラグインでも同一）ゆえ host（ai-harness-main）のリリースに runtimes/<rid>/native として同梱され、
+# host が起動時にフルパスで事前ロードして解決する。TreeSitter.DotNet はベア名でロードし .deps.json/ALC を
+# 通らないため、この事前ロードで解決している。from-source で host を自前配置する場合のみ runtimes/ を
+# 実行体隣へ置く（ai-harness-main/docs/build-and-deploy.md 参照）。
 
 cp ai-harness-constants/config/ai-harness-constants.yml  <プロジェクト>/.claude/harness/config/
 
