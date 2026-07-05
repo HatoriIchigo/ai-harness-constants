@@ -76,13 +76,15 @@ files:
 ```sh
 dotnet build ai-harness-constants/ai-harness-constants/ai-harness-constants.csproj -c Release
 
-# 出力一式（プラグイン DLL・TreeSitter.dll・runtimes/・.deps.json）を lib/ へ。
-# AssemblyDependencyResolver が .deps.json を見てネイティブ grammar を解決する。
+# プラグイン DLL・TreeSitter.dll（マネージド）と .deps.json は lib/ へ。
 BIN=ai-harness-constants/ai-harness-constants/bin/Release/net10.0
-cp "$BIN/ai-harness-constants.dll"      <配置先>/lib/
+cp "$BIN/ai-harness-constants.dll"       <配置先>/lib/
 cp "$BIN/ai-harness-constants.deps.json" <配置先>/lib/
 cp "$BIN/TreeSitter.dll"                 <配置先>/lib/
-cp -r "$BIN/runtimes"                    <配置先>/lib/
+# ネイティブ grammar（tree-sitter-*.dll）は**実行体（ai-harness-main）の隣**の runtimes/ へ。
+# TreeSitter.DotNet は grammar を「ベア名」で NativeLibrary.Load するため .deps.json/ALC では解決できず、
+# host が起動時に runtimes/<rid>/native をフルパスで事前ロードして解決する（lib/ 側は探索されない）。
+cp -r "$BIN/runtimes"                    <配置先>/runtimes
 
 cp ai-harness-constants/config/ai-harness-constants.yml  <プロジェクト>/.claude/harness/config/
 
