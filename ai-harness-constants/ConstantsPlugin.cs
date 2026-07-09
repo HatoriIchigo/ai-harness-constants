@@ -24,6 +24,9 @@ public sealed class ConstantsPlugin : PluginBase
 {
     public override string PluginName => "ai-harness-constants";
 
+    public override string Description =>
+        "AST 解析で、許可した定数ファイル以外のハードコード値を deny する";
+
     /// <summary>PostToolUse の全ツールで発火し、Action 内で書き込み系ツールを自己フィルタ。</summary>
     public override IReadOnlyList<string> Events => new[] { "PostToolUse" };
 
