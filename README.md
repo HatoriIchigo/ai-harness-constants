@@ -67,6 +67,24 @@ files:
 - **フェイルクローズ**: `files` 未設定／エントリが 1 つも有効でない／エントリに不正（`allow` の `**`・リスト・pattern 外）があると、対象言語のソース書き込みを **全て deny** する。エラー内容は reason に列挙されるので設定を修正する。
 - ファイルは PostToolUse 時点でディスク上にあるため、書き込んだ**ファイル全体**を解析する（当該編集箇所だけでなくファイル全体がハードコードフリーであることを求める）。
 
+## 能動スキャン（`ai-harness-main --fire`）
+
+hook は書き込みごとに 1 ファイルを検査する。これに対し `--fire` はプロジェクトの**既存ツリー全体**を一括点検する。`pattern` に合致する全ソースを走査し、`allow` 以外にハードコード値があれば **exit 2**（検出）。判定順は hook と同じ（対応言語 → `allow` は除外 → `pattern` に合致 → AST 解析）。
+
+hook のゲートではないため、exit 2 は書き込みの差し戻しではなく**スキャン結果のレポート**（CI 等で扱えるようコマンドの終了コードへ反映される）。設定が使用不可なら検査対象を決められないため、hook と同じくフェイルクローズで exit 2。
+
+```yaml
+fire:
+  gitignore: true
+  exclude:
+    - .git
+    - node_modules
+```
+
+- `exclude` … 一致するディレクトリを**部分木ごと**枝刈りし、一致するファイルも走査から外す。`pattern` と同じ glob（`**` / `*` / `?`）。フルパスと各 `/` 区切りサフィックスに照合されるため、名前指定（`node_modules`）・パス指定（`.claude/harness`）・glob（`"**/dist"`）のいずれも書ける。
+- `gitignore` … `true` で、git が無視する（未追跡かつ ignore の）ファイル／ディレクトリも走査から外す。各階層の `.gitignore`・否定（`!`）・`core.excludesFile`・`.git/info/exclude` を尊重する（git に問い合わせる）。git 未導入・非リポジトリなら警告して無効化し、スキャンは継続。既定は `false`。
+- 読めない／解析できないファイルは警告ログを出してスキップする（違反として扱わない）。
+
 ## エンジン
 
 [TreeSitter.DotNet](https://www.nuget.org/packages/TreeSitter.DotNet)（tree-sitter の .NET バインディング）を使用。ネイティブ grammar（`tree-sitter-*.dll`）を同梱し、Windows / Linux（x64）で動作する。
@@ -103,11 +121,12 @@ cp ai-harness-constants/config/ai-harness-constants.yml  <プロジェクト>/.c
 ai-harness-constants/
 ├── README.md
 ├── config/
-│   └── ai-harness-constants.yml   検査エントリ・テスト除外の定義（配置元）
+│   └── ai-harness-constants.yml   検査エントリ・テスト除外・fire の定義（配置元）
 └── ai-harness-constants/
     ├── ai-harness-constants.csproj
-    ├── ConstantsPlugin.cs         PostToolUse の発火・判定・reason 生成
+    ├── ConstantsPlugin.cs         PostToolUse の発火・能動スキャン・判定・reason 生成
     ├── ConstantsConfig.cs         設定の解釈とバリデーション
     ├── LiteralDetector.cs         tree-sitter で AST 解析しリテラルを検出
+    ├── FireScanner.cs             能動スキャンの走査（fire.exclude / fire.gitignore）
     └── GlobMatcher.cs             ** 対応の glob 一致（directory-checker と同一）
 ```
