@@ -2,14 +2,18 @@ using TreeSitter;
 
 namespace ai_harness_constants;
 
-/// <summary>検出したハードコードリテラル 1 件（種別・行番号・元テキスト）。</summary>
-public readonly record struct Literal(string Kind, int Line, string Text);
+/// <summary>
+/// 検出したハードコードリテラル 1 件。<see cref="Text"/> は表示用に 1 行へ畳んで切り詰めた元テキスト、
+/// <see cref="Raw"/> は AST 上の元テキストそのもの（同一判定に使う）。
+/// </summary>
+public readonly record struct Literal(string Kind, int Line, string Text, string Raw);
 
 /// <summary>
 /// tree-sitter（TreeSitter.DotNet）で対象言語のソースを AST 解析し、数値・文字列リテラルを検出する。
 /// 検出対象のノード型は言語ごとに実測して定義（<see cref="NumberTypes"/> / <see cref="StringTypes"/>）。
 /// 文字列は wrapper ノード（<c>string_literal</c> 等）で検出し、そこから下へは降りない。
 /// import/include のモジュール指定子の文字列は誤検知を避けるため除外する。
+/// 値が 0 / 1 の整数リテラルも除外する（<see cref="IsExemptNumber"/>）。
 /// </summary>
 public static class LiteralDetector
 {
@@ -123,14 +127,17 @@ public static class LiteralDetector
         {
             if (!IsInImportContext(node))
             {
-                found.Add(new Literal("string", node.StartPosition.Row + 1, Trim(node.Text)));
+                found.Add(new Literal("string", node.StartPosition.Row + 1, Trim(node.Text), node.Text ?? ""));
             }
             return; // 文字列 wrapper の配下（fragment/interpolation）へは降りない。
         }
 
         if (numberTypes.Contains(type))
         {
-            found.Add(new Literal("number", node.StartPosition.Row + 1, Trim(node.Text)));
+            if (!IsExemptNumber(node.Text))
+            {
+                found.Add(new Literal("number", node.StartPosition.Row + 1, Trim(node.Text), node.Text ?? ""));
+            }
             return;
         }
 
@@ -138,6 +145,58 @@ public static class LiteralDetector
         {
             Visit(child, numberTypes, stringTypes, found);
         }
+    }
+
+    /// <summary>
+    /// 検出対象外（範囲外）の数値リテラルか。値が <c>0</c> / <c>1</c> の整数のみ範囲外とする。
+    /// 添字・初期値・増減・番兵など言語の必然として現れ、定数へ切り出しても意味を持たないため。
+    /// 進数プレフィックス（<c>0x</c> / <c>0b</c> / <c>0o</c> / 先頭 0 の 8 進）・桁区切り（<c>_</c> / <c>'</c>）・
+    /// 型接尾辞（<c>u</c> / <c>L</c> / <c>f</c> / <c>i32</c> / <c>n</c> 等）は許容する（<c>0x00</c> / <c>1L</c> は範囲外）。
+    /// 2 以上の整数・小数・指数表記・虚数は意味を持つ値として検出する（<c>1.0</c> / <c>1e3</c> / <c>1i</c> は検出）。
+    /// </summary>
+    private static bool IsExemptNumber(string? rawText)
+    {
+        if (string.IsNullOrEmpty(rawText))
+        {
+            return false;
+        }
+
+        var text = rawText.Replace("_", "").Replace("'", "").ToLowerInvariant();
+
+        // 進数プレフィックスごとに、数字部分として許される文字を決める。
+        // プレフィックス無し = 10 進、および C 系の 8 進（先頭 0）。どちらも 0/1 判定は同じ扱いでよい。
+        var (prefixLength, isDigit) = text switch
+        {
+            _ when text.StartsWith("0x", StringComparison.Ordinal) => (2, (Func<char, bool>)char.IsAsciiHexDigit),
+            _ when text.StartsWith("0b", StringComparison.Ordinal) => (2, c => c is '0' or '1'),
+            _ when text.StartsWith("0o", StringComparison.Ordinal) => (2, c => c is >= '0' and <= '7'),
+            _ => (0, char.IsAsciiDigit),
+        };
+
+        var digitCount = 0;
+        while (prefixLength + digitCount < text.Length && isDigit(text[prefixLength + digitCount]))
+        {
+            digitCount++;
+        }
+        if (digitCount == 0)
+        {
+            return false; // ".5" のように数字で始まらない = 小数。
+        }
+
+        // 数字部分の直後で整数かを見分ける。小数点・指数・虚数が続くなら整数ではない。
+        // それ以外の残り（型接尾辞）は値に影響しないため無視してよい。
+        var suffix = text[(prefixLength + digitCount)..];
+        var isInteger = !suffix.StartsWith('.')
+            && !(prefixLength == 0 && suffix.StartsWith('e'))   // 10 進の指数: 1e3
+            && !(prefixLength == 2 && text[1] == 'x' && suffix.StartsWith('p'))   // 16 進の指数: 0x1p3
+            && suffix is not ("i" or "j");   // 虚数: 1i（Go）/ 1j（Python）
+        if (!isInteger)
+        {
+            return false;
+        }
+
+        var digits = text.Substring(prefixLength, digitCount).TrimStart('0');
+        return digits.Length == 0 || digits == "1";
     }
 
     /// <summary>文字列リテラルが import/include の指定子配下にあるか（祖先を数段だけ遡って判定）。</summary>

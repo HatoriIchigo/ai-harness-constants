@@ -3,18 +3,25 @@
 # 書き込み系ツール（Write / Edit / MultiEdit）の PostToolUse で、書き込んだソースファイルを
 # tree-sitter で AST 解析し、数値・文字列リテラル（ハードコード値）を検出したら deny（exit 2）する。
 # 許可された定数ファイル（allow）だけがハードコード値を持てる。
+# 値が 0 / 1 の整数リテラル（0x00 / 1L / 1i32 等の表記違いを含む）は範囲外＝検出しない。
+# 2 以上の整数・小数・指数・虚数は意味を持つ値として検出する。
 
 # 検査エントリ。各エントリは pattern（対象）と allow（許可先, 単一 glob）のマップ。
-#   pattern … ハードコード値を許可しない対象ソースの glob（** / * / ? 使用可）
-#   allow   … ハードコード値を許可する定数ファイルの glob。
-#             - 単一のみ（リスト不可）
-#             - ** は使用不可（*.java のような形式は可）
-#             - pattern の内側（pattern にマッチするパス）であること
+#   pattern     … ハードコード値を許可しない対象ソースの glob（** / * / ? 使用可）
+#   allow       … ハードコード値を許可する定数ファイルの glob。
+#                 - 単一のみ（リスト不可）
+#                 - ** は使用不可（*.java のような形式は可）
+#                 - pattern の内側（pattern にマッチするパス）であること
+#   same-string … true で、allow にマッチする定数ファイル群を横断し、同じ文字列リテラルが
+#                 2 箇所以上にあれば deny（exit 2）。同じ値の定数の二重定義を潰す。
+#                 同一判定はリテラル表記そのまま（"a" と 'a' は別物）。空文字列 "" も対象。
+#                 数値は対象外。省略時は false（true / false 以外を書くと設定エラー）。
 # テスト等を検査対象外にしたい場合は、単に pattern に含めなければよい
 # （どの pattern にもマッチしないファイルは管理対象外＝許可）。
 files:
   - pattern: "src/main/java/**/*.java"
     allow: "src/main/java/com/example/app/constants/*.java"
+    same-string: true
   - pattern: "frontend/main/**/*.ts"
     allow: "frontend/main/constants/*.ts"
 

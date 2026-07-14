@@ -9,9 +9,13 @@ namespace ai_harness_constants;
 /// 書かせないよう強制するプラグイン。書き込み系ツール（Write / Edit / MultiEdit）の
 /// <c>PostToolUse</c> で発火し、書き込んだファイルを tree-sitter で AST 解析する。
 ///
+/// 値が 0 / 1 の整数リテラルは範囲外として検出しない（<see cref="LiteralDetector"/>）。
+///
 /// 判定（対応言語のソースファイルのみが検査対象。.md 等の非ソースは対象外＝許可）:
 ///   1. 設定が使用不可            → deny（フェイルクローズ。エラー内容を提示）
-///   2. いずれかの allow にマッチ  → 許可（ハードコードを許可した定数ファイル）
+///   2. いずれかの allow にマッチ  → 許可（ハードコードを許可した定数ファイル）。
+///                                  ただし same-string: true のエントリでは、その allow 群を横断して
+///                                  同一文字列リテラルの重複を検査し、重複があれば deny
 ///   3. いずれかの pattern にマッチ → AST 解析。リテラルがあれば deny、無ければ許可
 ///   4. どの pattern にもマッチせず → 許可（このプラグインの管理対象外）
 ///
@@ -85,9 +89,52 @@ public sealed class ConstantsPlugin : PluginBase
         }
 
         // 2. allow にマッチ = ハードコードを許可した定数ファイル。
-        if (config.Entries.Any(e => GlobMatcher.IsMatch(e.Allow, filePath)))
+        //    same-string: true のエントリでは、その allow 群を横断して文字列の重複を検査する。
+        var allowEntries = config.Entries.Where(e => GlobMatcher.IsMatch(e.Allow, filePath)).ToList();
+        if (allowEntries.Count > 0)
         {
-            yield return LogEntry.Debug($"allow 対象のため許可: {filePath}");
+            var sameStringEntries = allowEntries.Where(e => e.SameString).ToList();
+            if (sameStringEntries.Count == 0)
+            {
+                yield return LogEntry.Debug($"allow 対象のため許可: {filePath}");
+                yield break;
+            }
+
+            // allow 群の他ファイルを読むためプロジェクトルートが要る。特定できなければ検査できない。
+            var root = data.Cwd;
+            if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
+            {
+                yield return LogEntry.Warning(
+                    $"プロジェクトルート（cwd）を特定できないため same-string 検査をスキップ: {filePath}");
+                yield break;
+            }
+
+            var warnings = new List<string>();
+            var groups = new List<DuplicateGroup>();
+            foreach (var entry in sameStringEntries)
+            {
+                var allowFiles = DuplicateStringChecker.CollectAllowFiles(root, entry.Allow);
+                var duplicates = DuplicateStringChecker.Find(allowFiles, warnings);
+                if (duplicates.Count > 0)
+                {
+                    groups.Add(new DuplicateGroup(entry.Allow, duplicates));
+                }
+            }
+            foreach (var warning in warnings)
+            {
+                yield return LogEntry.Warning(warning);
+            }
+
+            if (groups.Count == 0)
+            {
+                yield return LogEntry.Debug($"allow 対象・文字列の重複なしのため許可: {filePath}");
+                yield break;
+            }
+
+            yield return LogEntry.Warning(
+                $"定数ファイル群で重複した文字列 {groups.Sum(g => g.Duplicates.Count)} 件を検出: {filePath}");
+            result.ExitCode = 2;
+            result.Reason = BuildDuplicateReason(groups);
             yield break;
         }
 
@@ -219,15 +266,45 @@ public sealed class ConstantsPlugin : PluginBase
             findings.Add(new FileFinding(target.Path, literals));
         }
 
-        if (findings.Count == 0)
+        // same-string: true のエントリごとに、allow 群を横断して文字列の重複を検査する。
+        var dupWarnings = new List<string>();
+        var groups = new List<DuplicateGroup>();
+        foreach (var entry in config.Entries.Where(e => e.SameString))
         {
-            yield return LogEntry.Info("許可されていないハードコード値は見つからない");
+            var allowFiles = scan.Files
+                .Where(f => LiteralDetector.IsSupported(f) && GlobMatcher.IsMatch(entry.Allow, f))
+                .ToList();
+            var duplicates = DuplicateStringChecker.Find(allowFiles, dupWarnings);
+            if (duplicates.Count > 0)
+            {
+                yield return LogEntry.Warning(
+                    $"重複した文字列 {duplicates.Count} 件を検出（allow='{entry.Allow}' / {allowFiles.Count} ファイル）");
+                groups.Add(new DuplicateGroup(entry.Allow, duplicates));
+            }
+        }
+        foreach (var dupWarning in dupWarnings)
+        {
+            yield return LogEntry.Warning(dupWarning);
+        }
+
+        if (findings.Count == 0 && groups.Count == 0)
+        {
+            yield return LogEntry.Info("許可されていないハードコード値・定数ファイル内の文字列重複は見つからない");
             yield break; // ExitCode 0（許可）のまま
         }
 
-        yield return LogEntry.Warning($"ハードコード値を含むファイルを {findings.Count} 件検出");
+        var reasons = new List<string>();
+        if (findings.Count > 0)
+        {
+            yield return LogEntry.Warning($"ハードコード値を含むファイルを {findings.Count} 件検出");
+            reasons.Add(BuildFireReason(findings));
+        }
+        if (groups.Count > 0)
+        {
+            reasons.Add(BuildDuplicateReason(groups));
+        }
         result.ExitCode = 2;
-        result.Reason = BuildFireReason(findings);
+        result.Reason = string.Join("\n\n", reasons);
     }
 
     /// <summary>
@@ -265,6 +342,47 @@ public sealed class ConstantsPlugin : PluginBase
     /// <summary>reason に列挙する違反ファイルの最大件数と、1 ファイルあたりのリテラルの最大件数。</summary>
     private const int MaxReportedFiles = 50;
     private const int MaxReportedPerFile = 5;
+
+    /// <summary>reason に列挙する重複文字列の最大件数と、1 文字列あたりの出現箇所の最大件数。</summary>
+    private const int MaxReportedDuplicates = 20;
+    private const int MaxReportedOccurrences = 5;
+
+    /// <summary>same-string 検査で重複が見つかった allow 群 1 件。</summary>
+    private readonly record struct DuplicateGroup(string Allow, IReadOnlyList<DuplicateString> Duplicates);
+
+    /// <summary>
+    /// same-string の違反 reason。allow（ハードコード可の定数ファイル）群を横断して同一文字列が
+    /// 2 箇所以上に定義されている状態を、統合すべき重複として提示する。
+    /// </summary>
+    private static string BuildDuplicateReason(IReadOnlyList<DuplicateGroup> groups)
+    {
+        var total = groups.Sum(g => g.Duplicates.Count);
+        var sb = new StringBuilder();
+        sb.Append("定数ファイル内で同じ文字列リテラルが重複しています（計 ").Append(total).Append(" 件）:\n");
+        foreach (var group in groups)
+        {
+            sb.Append("- allow='").Append(group.Allow).Append("'（same-string: true）\n");
+            foreach (var duplicate in group.Duplicates.Take(MaxReportedDuplicates))
+            {
+                sb.Append("    - ").Append(duplicate.Text)
+                    .Append("（").Append(duplicate.Occurrences.Count).Append(" 箇所）\n");
+                foreach (var occurrence in duplicate.Occurrences.Take(MaxReportedOccurrences))
+                {
+                    sb.Append($"        - {occurrence.Path}: {occurrence.Line} 行目\n");
+                }
+                if (duplicate.Occurrences.Count > MaxReportedOccurrences)
+                {
+                    sb.Append($"        - …ほか {duplicate.Occurrences.Count - MaxReportedOccurrences} 箇所\n");
+                }
+            }
+            if (group.Duplicates.Count > MaxReportedDuplicates)
+            {
+                sb.Append($"    - …ほか {group.Duplicates.Count - MaxReportedDuplicates} 件\n");
+            }
+        }
+        sb.Append("\n重複した文字列は 1 つの定数へ統合し、各所からその定数を参照してください。");
+        return sb.ToString();
+    }
 
     private static string BuildFireReason(IReadOnlyList<FileFinding> findings)
     {

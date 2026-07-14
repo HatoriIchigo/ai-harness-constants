@@ -2,8 +2,12 @@ using System.Collections;
 
 namespace ai_harness_constants;
 
-/// <summary>有効な検査エントリ 1 件。対象 glob（ハードコード禁止）＋ allow glob（ハードコード許可）。</summary>
-public readonly record struct ConstantsEntry(string Pattern, string Allow);
+/// <summary>
+/// 有効な検査エントリ 1 件。対象 glob（ハードコード禁止）＋ allow glob（ハードコード許可）。
+/// <paramref name="SameString"/> が true なら、allow にマッチする定数ファイル群を横断して
+/// 同一文字列リテラルの重複も検査する（既定 false）。
+/// </summary>
+public readonly record struct ConstantsEntry(string Pattern, string Allow, bool SameString);
 
 /// <summary>
 /// ai-harness-constants の設定を解釈・検証した結果。
@@ -13,6 +17,7 @@ public readonly record struct ConstantsEntry(string Pattern, string Allow);
 /// files:
 ///   - pattern: "src/main/java/**/*.java"     # ハードコードを許可しない対象
 ///     allow:   "src/main/java/.../constants/*.java"   # ハードコードを許可する単一 glob
+///     same-string: true                      # allow 群での文字列重複も禁止（省略時 false）
 /// </code>
 ///
 /// テストファイル等を検査対象外にしたい場合は、単に pattern に含めなければよい
@@ -23,6 +28,7 @@ public readonly record struct ConstantsEntry(string Pattern, string Allow);
 ///   - allow は単一スカラ（リスト不可）
 ///   - allow に <c>**</c> を含まないこと
 ///   - allow が pattern の内側（pattern にマッチするパス）であること
+///   - same-string は省略可。指定するなら <c>true</c> / <c>false</c> であること
 /// </summary>
 public sealed class ConstantsConfig
 {
@@ -108,7 +114,20 @@ public sealed class ConstantsConfig
             return;
         }
 
-        entries.Add(new ConstantsEntry(pattern.Trim(), allow));
+        // same-string は省略可（既定 false）。指定するなら真偽値であること。
+        var sameString = false;
+        var sameStringRaw = Get(map, "same-string");
+        if (sameStringRaw is not null)
+        {
+            if (!bool.TryParse(sameStringRaw.ToString(), out sameString))
+            {
+                errors.Add(
+                    $"files[{index}] (pattern='{pattern}'): same-string は true / false で指定してください（same-string='{sameStringRaw}'）。");
+                return;
+            }
+        }
+
+        entries.Add(new ConstantsEntry(pattern.Trim(), allow, sameString));
     }
 
     /// <summary>allow が pattern の内側か（allow パターン文字列が pattern の glob にマッチするか）。</summary>

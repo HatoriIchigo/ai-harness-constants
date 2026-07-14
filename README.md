@@ -24,11 +24,13 @@ PostToolUse のため書き込み自体は止められない。deny 時は検出
 
 ## 検出対象
 
-- **数値リテラル** … 整数・浮動小数（進数・指数・接尾辞・虚数含む）
+- **数値リテラル** … 整数・浮動小数（進数・指数・接尾辞・虚数含む）。ただし **値が 0 / 1 の整数は範囲外**（下記）
 - **文字列リテラル** … 通常文字列・raw 文字列・テンプレート/f-string 等（wrapper ノードで 1 件として検出）
 
 除外するもの:
 
+- **値が 0 / 1 の整数リテラル**。添字・初期値・増減・番兵など言語の必然として現れ、定数へ切り出しても意味を持たないため検出しない。進数プレフィックス・桁区切り・型接尾辞は許容する（`0` / `1` / `0x00` / `0b1` / `01` / `1L` / `1u` / `1i32` / `1n` はいずれも範囲外）。
+  2 以上の整数・小数・指数表記・虚数は意味を持つ値として**検出する**（`2` / `0xFF` / `017` / `0.5` / `1.0` / `1e3` / `1i` は検出）。
 - **import / include のモジュール指定子**（`import x from "mod"` / `#include "foo.h"` / `import "fmt"` 等）は必然のため検出しない。
 - **真偽値・文字リテラル・null**（`true` / `'a'` / `null` 等）は対象外（数値・文字列のみ）。
 - テスト等を検査対象外にしたい場合は、単に `pattern` に含めなければよい（どの `pattern` にもマッチしないファイルは管理対象外＝許可）。
@@ -39,17 +41,34 @@ PostToolUse のため書き込み自体は止められない。deny 時は検出
 files:
   - pattern: "src/main/java/**/*.java"
     allow: "src/main/java/com/example/app/constants/*.java"
+    same-string: true
   - pattern: "frontend/main/**/*.ts"
     allow: "frontend/main/constants/*.ts"
 ```
 
-各エントリは `pattern`（対象ソース）と `allow`（ハードコードを許可する定数ファイル）のマップ。
+各エントリは `pattern`（対象ソース）と `allow`（ハードコードを許可する定数ファイル）のマップ。`same-string` は省略可（既定 `false`）。
 
 ### allow の制約（違反すると設定は使用不可＝フェイルクローズ）
 
 - **単一のみ**（リスト不可）
 - **`**` を使用不可**（`*.java` のような形式は可）
 - **`pattern` の内側**であること（`allow` にマッチするパスは `pattern` にもマッチする）
+
+### same-string（定数ファイル内の文字列重複を禁止）
+
+`true` にすると、その **`allow` にマッチする定数ファイル群を横断**して文字列リテラルを集計し、同一の文字列が 2 箇所以上にあれば **deny（exit 2）**。同じ値の定数が二重定義されている状態を潰す。
+
+```
+constants/Http.java:  CONTENT_TYPE = "application/json"
+constants/Api.java:   MEDIA_TYPE   = "application/json"   ← 重複 → deny
+```
+
+- **allow 側にだけ効く**検査。`pattern` 側はそもそもリテラルが deny されるため重複を論じる余地がない。
+- **同一判定はリテラル表記そのまま**。`"a"` と `'a'` は別物として扱う。
+- **空文字列 `""` も対象**（2 箇所以上あれば重複）。
+- **数値は対象外**。同じ数値が別意味の定数に現れるのは正当なため（`MAX = 100` と `TIMEOUT = 100`）。
+- 省略時は `false`。`true` / `false` 以外の値は設定エラー＝フェイルクローズ。
+- hook では、書き込んだファイルが `allow` にマッチしたときに同じ `allow` 群の他ファイルも読んで検査する（走査は `allow` の固定ディレクトリ配下に限定。プロジェクト全体は走査しない）。プロジェクトルート（hook の `cwd`）を特定できない場合は警告してスキップする。
 
 ## 判定フロー
 
@@ -58,6 +77,8 @@ files:
 ```
 1. 設定が使用不可            → deny（フェイルクローズ。エラー内容を提示）
 2. いずれかの allow にマッチ  → 許可（ハードコード可の定数ファイル）
+                              ただし same-string: true のエントリでは、その allow 群を横断して
+                              文字列の重複を検査：重複あり→deny / なし→許可
 3. いずれかの pattern にマッチ → AST 解析：リテラルあり→deny / なし→許可
 4. どの pattern にもマッチせず → 許可（管理対象外）
 ```
@@ -69,7 +90,7 @@ files:
 
 ## 能動スキャン（`ai-harness-main --fire`）
 
-hook は書き込みごとに 1 ファイルを検査する。これに対し `--fire` はプロジェクトの**既存ツリー全体**を一括点検する。`pattern` に合致する全ソースを走査し、`allow` 以外にハードコード値があれば **exit 2**（検出）。判定順は hook と同じ（対応言語 → `allow` は除外 → `pattern` に合致 → AST 解析）。
+hook は書き込みごとに 1 ファイルを検査する。これに対し `--fire` はプロジェクトの**既存ツリー全体**を一括点検する。`pattern` に合致する全ソースを走査し、`allow` 以外にハードコード値があれば **exit 2**（検出）。判定順は hook と同じ（対応言語 → `allow` は除外 → `pattern` に合致 → AST 解析）。`same-string: true` のエントリについては、加えて `allow` 群の文字列重複も集計してレポートする（どちらか一方でも検出があれば exit 2）。
 
 hook のゲートではないため、exit 2 は書き込みの差し戻しではなく**スキャン結果のレポート**（CI 等で扱えるようコマンドの終了コードへ反映される）。設定が使用不可なら検査対象を決められないため、hook と同じくフェイルクローズで exit 2。
 
@@ -127,6 +148,7 @@ ai-harness-constants/
     ├── ConstantsPlugin.cs         PostToolUse の発火・能動スキャン・判定・reason 生成
     ├── ConstantsConfig.cs         設定の解釈とバリデーション
     ├── LiteralDetector.cs         tree-sitter で AST 解析しリテラルを検出
+    ├── DuplicateStringChecker.cs  same-string: allow 群を横断した文字列重複の検査
     ├── FireScanner.cs             能動スキャンの走査（fire.exclude / fire.gitignore）
     └── GlobMatcher.cs             ** 対応の glob 一致（directory-checker と同一）
 ```
