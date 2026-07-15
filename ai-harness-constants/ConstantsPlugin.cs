@@ -39,6 +39,9 @@ public sealed class ConstantsPlugin : PluginBase
 
     public override string ConfigName => "ai-harness-constants.yml";
 
+    /// <summary>埋め込み rule（<c>constants.rule.md</c>）を各プロジェクトの <c>.claude/rules</c> へ配布する。</summary>
+    public override bool ProvidesRule => true;
+
     /// <summary>ファイルを書き込む対象ツール。</summary>
     private static readonly HashSet<string> TargetTools =
         new(StringComparer.Ordinal) { "Write", "Edit", "MultiEdit" };
