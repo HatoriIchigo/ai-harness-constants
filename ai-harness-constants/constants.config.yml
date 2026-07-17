@@ -7,3 +7,12 @@ files:
   - pattern: "__ai_harness_placeholder__/**/*.__disabled__"
     allow: "__ai_harness_placeholder__/constants.__disabled__"
     # same-string: true    # allow 群を横断して同一文字列リテラルの重複も deny する
+    #
+    # 以下は検査を緩める設定。省略時は数値・文字列を全て検出する（最も厳しい）。
+    # numbers: false       # 数値リテラルを検出しない
+    # strings: false       # 文字列リテラルを検出しない
+    # ignore-context:      # 定数化しても意味を持ちにくい文脈を検出しない
+    #   - annotation       #   アノテーション／デコレータ／属性の引数
+    #   - throw            #   例外送出・エラー生成の引数
+    #   - log              #   ログ出力・標準出力の引数
+    # min-occurrences: 2   # 同一値がファイル内で 2 回以上のときだけ違反にする

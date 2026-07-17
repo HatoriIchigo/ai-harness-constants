@@ -106,7 +106,9 @@ public static class DuplicateStringChecker
             IReadOnlyList<Literal> literals;
             try
             {
-                literals = LiteralDetector.Detect(languageId, source);
+                // 重複検査は allow（定数ファイル）が対象。エントリの緩和設定（numbers / strings /
+                // ignore-context / min-occurrences）は pattern 側の検査にのみ効くため、ここでは絞らない。
+                literals = LiteralDetector.Detect(languageId, source, DetectOptions.All);
             }
             catch (Exception e)
             {

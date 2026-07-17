@@ -11,12 +11,17 @@ namespace ai_harness_constants;
 ///
 /// 値が 0 / 1 の整数リテラルは範囲外として検出しない（<see cref="LiteralDetector"/>）。
 ///
+/// 検査はエントリ単位で緩められる（既定は従来どおり数値・文字列を全て検出）:
+///   numbers / strings … 種別ごとに検出の有無を切り替える
+///   ignore-context    … アノテーション／例外送出／ログ出力の引数を検出しない
+///   min-occurrences   … 同一値がファイル内で N 回以上のときだけ違反とする
+///
 /// 判定（対応言語のソースファイルのみが検査対象。.md 等の非ソースは対象外＝許可）:
 ///   1. 設定が使用不可            → deny（フェイルクローズ。エラー内容を提示）
 ///   2. いずれかの allow にマッチ  → 許可（ハードコードを許可した定数ファイル）。
 ///                                  ただし same-string: true のエントリでは、その allow 群を横断して
 ///                                  同一文字列リテラルの重複を検査し、重複があれば deny
-///   3. いずれかの pattern にマッチ → AST 解析。リテラルがあれば deny、無ければ許可
+///   3. pattern にマッチ（先頭優先）→ AST 解析。リテラルがあれば deny、無ければ許可
 ///   4. どの pattern にもマッチせず → 許可（このプラグインの管理対象外）
 ///
 /// テストファイル等を除外したい場合は pattern に含めなければよい（4 で許可される）。
@@ -141,8 +146,17 @@ public sealed class ConstantsPlugin : PluginBase
             yield break;
         }
 
-        // 3. pattern にマッチ = 検査対象。
-        if (!config.Entries.Any(e => GlobMatcher.IsMatch(e.Pattern, filePath)))
+        // 3. pattern にマッチ = 検査対象（複数マッチは先頭優先。エントリごとに緩和設定が異なるため）。
+        ConstantsEntry? matched = null;
+        foreach (var entry in config.Entries)
+        {
+            if (GlobMatcher.IsMatch(entry.Pattern, filePath))
+            {
+                matched = entry;
+                break;
+            }
+        }
+        if (matched is null)
         {
             // 4. どの pattern にもマッチしない = 管理対象外。
             yield return LogEntry.Debug($"どの pattern にもマッチせず対象外: {filePath}");
@@ -166,11 +180,13 @@ public sealed class ConstantsPlugin : PluginBase
             yield break;
         }
 
+        var rule = matched.Value;
         IReadOnlyList<Literal> literals = Array.Empty<Literal>();
         string? detectError = null;
         try
         {
-            literals = LiteralDetector.Detect(languageId, source!);
+            literals = LiteralDetector.Detect(languageId, source!, ToDetectOptions(rule));
+            literals = OccurrenceFilter.Apply(literals, rule.MinOccurrences);
         }
         catch (Exception e)
         {
@@ -249,7 +265,8 @@ public sealed class ConstantsPlugin : PluginBase
             IReadOnlyList<Literal> literals = Array.Empty<Literal>();
             try
             {
-                literals = LiteralDetector.Detect(target.LanguageId, source!);
+                literals = LiteralDetector.Detect(target.LanguageId, source!, ToDetectOptions(target.Rule));
+                literals = OccurrenceFilter.Apply(literals, target.Rule.MinOccurrences);
             }
             catch (Exception e)
             {
@@ -312,7 +329,8 @@ public sealed class ConstantsPlugin : PluginBase
 
     /// <summary>
     /// 走査したファイルから検査対象を選ぶ。Action の判定順と同じく、対応言語のソースで、
-    /// allow（ハードコード可の定数ファイル）に該当せず、いずれかの pattern に合致するものだけを残す。
+    /// allow（ハードコード可の定数ファイル）に該当せず、いずれかの pattern に合致するものだけを、
+    /// 適用するエントリ（複数マッチは先頭優先）とともに残す。
     /// </summary>
     private static List<FireTarget> SelectTargets(IReadOnlyList<string> files, ConstantsConfig config)
     {
@@ -327,17 +345,24 @@ public sealed class ConstantsPlugin : PluginBase
             {
                 continue; // allow = ハードコードを許可した定数ファイル
             }
-            if (!config.Entries.Any(e => GlobMatcher.IsMatch(e.Pattern, file)))
+            foreach (var entry in config.Entries)
             {
-                continue; // どの pattern にも合致しない = 管理対象外
+                if (GlobMatcher.IsMatch(entry.Pattern, file))
+                {
+                    targets.Add(new FireTarget(file, languageId, entry));
+                    break; // 先頭優先
+                }
             }
-            targets.Add(new FireTarget(file, languageId));
         }
         return targets;
     }
 
-    /// <summary>検査対象 1 件（パスと解析に使う言語 ID）。</summary>
-    private readonly record struct FireTarget(string Path, string LanguageId);
+    /// <summary>エントリの緩和設定を検出オプションへ写す。</summary>
+    private static DetectOptions ToDetectOptions(ConstantsEntry entry) =>
+        new(entry.Numbers, entry.Strings, entry.Ignore);
+
+    /// <summary>検査対象 1 件（パス・解析に使う言語 ID・適用するエントリ）。</summary>
+    private readonly record struct FireTarget(string Path, string LanguageId, ConstantsEntry Rule);
 
     /// <summary>スキャンで違反が見つかったファイル 1 件。</summary>
     private readonly record struct FileFinding(string Path, IReadOnlyList<Literal> Literals);

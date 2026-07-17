@@ -9,6 +9,35 @@ namespace ai_harness_constants;
 public readonly record struct Literal(string Kind, int Line, string Text, string Raw);
 
 /// <summary>
+/// 検出しない文脈（設定 <c>ignore-context</c>）。定数へ切り出しても意味を持ちにくい位置の値を見逃す。
+/// </summary>
+[Flags]
+public enum IgnoreContext
+{
+    /// <summary>除外なし（既定）。</summary>
+    None = 0,
+
+    /// <summary>アノテーション／デコレータ／属性の引数（<c>@Column(name = "id")</c> 等）。</summary>
+    Annotation = 1,
+
+    /// <summary>例外送出・エラー生成の引数（<c>throw new X("msg")</c> / <c>errors.New("msg")</c> 等）。</summary>
+    Throw = 2,
+
+    /// <summary>ログ出力・標準出力の引数（<c>logger.info("msg")</c> / <c>console.log("msg")</c> 等）。</summary>
+    Log = 4,
+}
+
+/// <summary>
+/// 検出の絞り込み。<see cref="Numbers"/> / <see cref="Strings"/> で種別ごとに検出の有無を、
+/// <see cref="Ignore"/> で検出しない文脈を指定する。
+/// </summary>
+public readonly record struct DetectOptions(bool Numbers, bool Strings, IgnoreContext Ignore)
+{
+    /// <summary>絞り込み無し（数値・文字列を全て検出）。エントリ設定に依らない検出に使う。</summary>
+    public static DetectOptions All => new(true, true, IgnoreContext.None);
+}
+
+/// <summary>
 /// tree-sitter（TreeSitter.DotNet）で対象言語のソースを AST 解析し、数値・文字列リテラルを検出する。
 /// 検出対象のノード型は言語ごとに実測して定義（<see cref="NumberTypes"/> / <see cref="StringTypes"/>）。
 /// 文字列は wrapper ノード（<c>string_literal</c> 等）で検出し、そこから下へは降りない。
@@ -84,6 +113,55 @@ public static class LiteralDetector
         "import_from_statement",   // python: from "..." (稀)
     };
 
+    /// <summary>アノテーション／デコレータ／属性を表す祖先ノード型（<see cref="IgnoreContext.Annotation"/>）。</summary>
+    private static readonly HashSet<string> AnnotationTypes = new(StringComparer.Ordinal)
+    {
+        "annotation",              // java: @Column(name = "id")
+        "marker_annotation",       // java: @Override
+        "decorator",               // python / typescript: @app.route("/x")
+        "attribute_item",          // rust: #[cfg(feature = "x")]
+        "inner_attribute_item",    // rust: #![...]
+        "attribute",               // rust（attribute_item 配下）
+        "attribute_declaration",   // c / cpp: [[...]]
+        "attribute_specifier",     // cpp: __attribute__((...))
+    };
+
+    /// <summary>例外送出を表す祖先ノード型（<see cref="IgnoreContext.Throw"/>）。</summary>
+    private static readonly HashSet<string> ThrowStatementTypes = new(StringComparer.Ordinal)
+    {
+        "throw_statement",   // java / cpp / typescript
+        "raise_statement",   // python
+    };
+
+    /// <summary>呼び出しを表すノード型。呼び出し先の名前で log / throw の文脈を判定する。</summary>
+    private static readonly HashSet<string> CallTypes = new(StringComparer.Ordinal)
+    {
+        "call_expression",     // c / cpp / go / rust / typescript
+        "method_invocation",   // java
+        "call",                // python
+        "macro_invocation",    // rust: panic!("msg")
+    };
+
+    /// <summary>例外送出・エラー生成とみなす呼び出し名（末尾の識別子。小文字で比較）。</summary>
+    private static readonly HashSet<string> ThrowNames = new(StringComparer.Ordinal)
+    {
+        "panic", "unreachable", "todo", "unimplemented", "expect",
+    };
+
+    /// <summary>例外送出・エラー生成とみなす呼び出し先（末尾一致。小文字で比較）。</summary>
+    private static readonly string[] ThrowCallees = { "errors.new", "fmt.errorf" };
+
+    /// <summary>ログ出力・標準出力とみなす呼び出し名（末尾の識別子。小文字で比較）。</summary>
+    private static readonly HashSet<string> LogNames = new(StringComparer.Ordinal)
+    {
+        "log", "logf", "debug", "debugf", "info", "infof", "warn", "warnf", "warning",
+        "error", "errorf", "fatal", "fatalf", "trace", "tracef",
+        "print", "printf", "println", "printfn", "eprint", "eprintln", "printstacktrace",
+    };
+
+    /// <summary>文脈判定で遡る祖先の最大段数。</summary>
+    private const int MaxContextDepth = 16;
+
     /// <summary>ファイルパスの拡張子から対応言語 id を得る。未対応なら false。</summary>
     public static bool TryGetLanguageId(string filePath, out string languageId)
     {
@@ -97,8 +175,9 @@ public static class LiteralDetector
     /// <summary>
     /// ソースを解析し、数値・文字列リテラルを列挙する。<paramref name="languageId"/> は
     /// <see cref="TryGetLanguageId"/> で得た値。未対応言語なら空を返す。
+    /// <paramref name="options"/> で種別・文脈の絞り込みを指定する。
     /// </summary>
-    public static IReadOnlyList<Literal> Detect(string languageId, string source)
+    public static IReadOnlyList<Literal> Detect(string languageId, string source, DetectOptions options)
     {
         if (!NumberTypes.TryGetValue(languageId, out var numberTypes)
             || !StringTypes.TryGetValue(languageId, out var stringTypes))
@@ -115,17 +194,18 @@ public static class LiteralDetector
         }
 
         var found = new List<Literal>();
-        Visit(tree.RootNode, numberTypes, stringTypes, found);
+        Visit(tree.RootNode, numberTypes, stringTypes, options, found);
         return found;
     }
 
-    private static void Visit(Node node, HashSet<string> numberTypes, HashSet<string> stringTypes, List<Literal> found)
+    private static void Visit(
+        Node node, HashSet<string> numberTypes, HashSet<string> stringTypes, DetectOptions options, List<Literal> found)
     {
         var type = node.Type;
 
         if (stringTypes.Contains(type))
         {
-            if (!IsInImportContext(node))
+            if (options.Strings && !IsInImportContext(node) && !IsIgnoredContext(node, options.Ignore))
             {
                 found.Add(new Literal("string", node.StartPosition.Row + 1, Trim(node.Text), node.Text ?? ""));
             }
@@ -134,7 +214,7 @@ public static class LiteralDetector
 
         if (numberTypes.Contains(type))
         {
-            if (!IsExemptNumber(node.Text))
+            if (options.Numbers && !IsExemptNumber(node.Text) && !IsIgnoredContext(node, options.Ignore))
             {
                 found.Add(new Literal("number", node.StartPosition.Row + 1, Trim(node.Text), node.Text ?? ""));
             }
@@ -143,7 +223,7 @@ public static class LiteralDetector
 
         foreach (var child in node.NamedChildren)
         {
-            Visit(child, numberTypes, stringTypes, found);
+            Visit(child, numberTypes, stringTypes, options, found);
         }
     }
 
@@ -198,6 +278,94 @@ public static class LiteralDetector
         var digits = text.Substring(prefixLength, digitCount).TrimStart('0');
         return digits.Length == 0 || digits == "1";
     }
+
+    /// <summary>
+    /// リテラルが <paramref name="ignore"/> で指定された文脈の配下にあるか。祖先を遡り、
+    /// ノード型（アノテーション・throw 文）と、呼び出しノードの呼び出し先名（log / throw 相当）で判定する。
+    ///
+    /// 呼び出し先名による判定は言語をまたぐヒューリスティック。<c>logger.info</c> と同名の
+    /// 無関係なメソッドも除外され得るが、緩める方向の誤りに倒してある。
+    /// </summary>
+    private static bool IsIgnoredContext(Node node, IgnoreContext ignore)
+    {
+        if (ignore == IgnoreContext.None)
+        {
+            return false;
+        }
+
+        var cur = node.Parent;
+        for (var depth = 0; cur is not null && depth < MaxContextDepth; depth++)
+        {
+            var type = cur.Type;
+            if (ignore.HasFlag(IgnoreContext.Annotation) && AnnotationTypes.Contains(type))
+            {
+                return true;
+            }
+            if (ignore.HasFlag(IgnoreContext.Throw) && ThrowStatementTypes.Contains(type))
+            {
+                return true;
+            }
+            if (CallTypes.Contains(type) && IsIgnoredCall(cur, ignore))
+            {
+                return true;
+            }
+            cur = cur.Parent;
+        }
+        return false;
+    }
+
+    /// <summary>呼び出しノードの呼び出し先が、除外対象の log / throw 相当か。</summary>
+    private static bool IsIgnoredCall(Node call, IgnoreContext ignore)
+    {
+        var callee = Callee(call);
+        if (callee is null)
+        {
+            return false;
+        }
+        if (ignore.HasFlag(IgnoreContext.Throw)
+            && (ThrowNames.Contains(LastIdentifier(callee) ?? "")
+                || ThrowCallees.Any(c => callee.EndsWith(c, StringComparison.Ordinal))))
+        {
+            return true;
+        }
+        return ignore.HasFlag(IgnoreContext.Log) && LogNames.Contains(LastIdentifier(callee) ?? "");
+    }
+
+    /// <summary>
+    /// 呼び出しノードから呼び出し先の表記を取り出す（小文字化）。引数リストの手前までを見るため、
+    /// <c>logger.info("x")</c> → <c>logger.info</c>、<c>panic!("x")</c> → <c>panic</c> となる。
+    /// フィールド名の API に依存せず全言語で同じ扱いにできる。
+    /// </summary>
+    private static string? Callee(Node call)
+    {
+        var text = call.Text;
+        if (string.IsNullOrEmpty(text))
+        {
+            return null;
+        }
+        var paren = text.IndexOf('(');
+        var head = (paren >= 0 ? text[..paren] : text).Trim();
+        head = head.TrimEnd('!').Trim();   // rust のマクロ呼び出し: panic!
+        return head.Length == 0 ? null : head.ToLowerInvariant();
+    }
+
+    /// <summary>呼び出し先表記の末尾の識別子（<c>logger.info</c> → <c>info</c>）。</summary>
+    private static string? LastIdentifier(string callee)
+    {
+        var end = callee.Length;
+        while (end > 0 && !IsIdentifierChar(callee[end - 1]))
+        {
+            end--;
+        }
+        var start = end;
+        while (start > 0 && IsIdentifierChar(callee[start - 1]))
+        {
+            start--;
+        }
+        return end > start ? callee[start..end] : null;
+    }
+
+    private static bool IsIdentifierChar(char c) => char.IsAsciiLetterOrDigit(c) || c == '_';
 
     /// <summary>文字列リテラルが import/include の指定子配下にあるか（祖先を数段だけ遡って判定）。</summary>
     private static bool IsInImportContext(Node node)

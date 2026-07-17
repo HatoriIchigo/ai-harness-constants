@@ -16,14 +16,35 @@
 #                 2 箇所以上にあれば deny（exit 2）。同じ値の定数の二重定義を潰す。
 #                 同一判定はリテラル表記そのまま（"a" と 'a' は別物）。空文字列 "" も対象。
 #                 数値は対象外。省略時は false（true / false 以外を書くと設定エラー）。
+#
+# 以下は検査を緩める設定。いずれも省略時は従来どおり「数値・文字列を全て検出」＝最も厳しい。
+# pattern 側の検査にのみ効き、same-string（allow 群の重複検査）には影響しない。
+#   numbers     … 数値リテラルを検出するか（省略時 true）
+#   strings     … 文字列リテラルを検出するか（省略時 true）
+#                 「マジックナンバーだけ禁止、文字列は許容」なら strings: false。
+#   ignore-context … 検出しない文脈のリスト（省略時は無し）。定数へ切り出しても意味を持ちにくい位置を見逃す。
+#                 - annotation … アノテーション／デコレータ／属性の引数（@Column(name = "id") 等）
+#                 - throw      … 例外送出・エラー生成の引数（throw new X("msg") / errors.New("msg") 等）
+#                 - log        … ログ出力・標準出力の引数（logger.info("msg") / console.log("msg") 等）
+#   min-occurrences … 同一値がファイル内で N 回以上のときだけ違反（省略時 1 ＝全て違反）。
+#                 2 にすると「散らばっている値」だけが対象になり、1 回きりの値は見逃す。
+#                 同一判定は種別＋リテラル表記。集計はファイル単位（ファイルを跨がない）。
+#
+# ファイルが複数の pattern に合致する場合は先頭優先（エントリごとに緩和設定が異なるため）。
 # テスト等を検査対象外にしたい場合は、単に pattern に含めなければよい
 # （どの pattern にもマッチしないファイルは管理対象外＝許可）。
 files:
   - pattern: "src/main/java/**/*.java"
     allow: "src/main/java/com/example/app/constants/*.java"
     same-string: true
+    ignore-context:        # ログ文言・例外メッセージ・アノテーション引数は定数化しても得が無いため見逃す
+      - annotation
+      - throw
+      - log
   - pattern: "frontend/main/**/*.ts"
     allow: "frontend/main/constants/*.ts"
+    strings: false         # 数値のマジックナンバーだけ禁止し、文字列は許容する
+    min-occurrences: 2     # 同じ値が 2 箇所以上に散らばっているときだけ違反にする
 
 # ai-harness-main --fire での能動スキャン設定。
 # 上記 pattern に合致する全ソースを走査し、allow 以外にハードコード値があれば exit 2。

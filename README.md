@@ -35,6 +35,8 @@ PostToolUse のため書き込み自体は止められない。deny 時は検出
 - **真偽値・文字リテラル・null**（`true` / `'a'` / `null` 等）は対象外（数値・文字列のみ）。
 - テスト等を検査対象外にしたい場合は、単に `pattern` に含めなければよい（どの `pattern` にもマッチしないファイルは管理対象外＝許可）。
 
+上記に加え、エントリ単位で検査を**緩められる**（`numbers` / `strings` / `ignore-context` / `min-occurrences`）。既定はいずれも従来どおり「数値・文字列を全て検出」。
+
 ## 設定（config/ai-harness-constants.yml）
 
 ```yaml
@@ -42,11 +44,43 @@ files:
   - pattern: "src/main/java/**/*.java"
     allow: "src/main/java/com/example/app/constants/*.java"
     same-string: true
+    ignore-context:        # ログ文言・例外メッセージ・アノテーション引数は見逃す
+      - annotation
+      - throw
+      - log
   - pattern: "frontend/main/**/*.ts"
     allow: "frontend/main/constants/*.ts"
+    strings: false         # 数値のマジックナンバーだけ禁止
+    min-occurrences: 2     # 同じ値が 2 箇所以上に散らばっているときだけ違反
 ```
 
-各エントリは `pattern`（対象ソース）と `allow`（ハードコードを許可する定数ファイル）のマップ。`same-string` は省略可（既定 `false`）。
+各エントリは `pattern`（対象ソース）と `allow`（ハードコードを許可する定数ファイル）のマップ。`same-string`・緩和設定は省略可。ファイルが複数の `pattern` に合致する場合は**先頭優先**（エントリごとに緩和設定が異なるため）。
+
+### 検査を緩める（numbers / strings / ignore-context / min-occurrences）
+
+pattern の全体を管理対象から外さずに、値の種類・位置・散らばり方で検査の強さを調整する。**`pattern` 側の検査にのみ効き、`same-string`（`allow` 群の重複検査）には影響しない。**
+
+| キー | 既定 | 内容 |
+|---|---|---|
+| `numbers` | `true` | 数値リテラルを検出するか |
+| `strings` | `true` | 文字列リテラルを検出するか |
+| `ignore-context` | なし | 検出しない文脈のリスト（下記） |
+| `min-occurrences` | `1` | 同一値がファイル内で N 回以上のときだけ違反 |
+
+- `numbers` / `strings` … 「マジックナンバーは禁止、文字列は許容」なら `strings: false`。
+- `min-occurrences` … `2` にすると**散らばっている値**だけが違反になり、1 箇所きりの値は見逃す。1 箇所にしか無い値は定数へ切り出しても参照が 1 つで DRY の観点から得が薄いため。同一判定は種別＋リテラル表記（`"a"` と `'a'` は別物）。集計は**ファイル単位**（hook が 1 ファイルしか見ないため、ファイルを跨いだ集計はしない。`--fire` でも同じ）。
+
+#### ignore-context の語彙
+
+| 値 | 対象 | 判定 |
+|---|---|---|
+| `annotation` | アノテーション／デコレータ／属性の引数（`@Column(name = "id")` / `@app.route("/x")` / `#[cfg(feature = "x")]`） | 祖先ノード型 |
+| `throw` | 例外送出・エラー生成の引数（`throw new X("msg")` / `raise ValueError("msg")` / `panic!("msg")` / `errors.New("msg")` / `fmt.Errorf(...)` / `.expect("msg")`） | 祖先ノード型（`throw_statement` / `raise_statement`）＋呼び出し先名 |
+| `log` | ログ出力・標準出力の引数（`logger.info("msg")` / `console.log("msg")` / `System.out.println(...)` / `print(...)` / `fmt.Println(...)`） | 呼び出し先名 |
+
+- 数値・文字列の**両方**に効く（`@Column(length = 255)` の `255` も除外される）。
+- 呼び出し先名による判定（`log` / `throw` の一部）は**言語をまたぐヒューリスティック**。呼び出し先の末尾の識別子を名前の集合（`info` / `warn` / `println` / `panic` / `expect` 等）と突き合わせるため、同名の無関係なメソッドの引数も除外され得る。**緩める方向の誤りに倒してある**（見逃しは起きるが、正当な値が誤って deny されることはない）。
+- 語彙外の値を書くと設定エラー＝フェイルクローズ。
 
 ### allow の制約（違反すると設定は使用不可＝フェイルクローズ）
 
@@ -79,13 +113,13 @@ constants/Api.java:   MEDIA_TYPE   = "application/json"   ← 重複 → deny
 2. いずれかの allow にマッチ  → 許可（ハードコード可の定数ファイル）
                               ただし same-string: true のエントリでは、その allow 群を横断して
                               文字列の重複を検査：重複あり→deny / なし→許可
-3. いずれかの pattern にマッチ → AST 解析：リテラルあり→deny / なし→許可
+3. pattern にマッチ（先頭優先）→ AST 解析：リテラルあり→deny / なし→許可
 4. どの pattern にもマッチせず → 許可（管理対象外）
 ```
 
-テスト等を検査対象外にしたい場合は、単に `pattern` に含めなければよい（4 で許可される）。
+テスト等を検査対象外にしたい場合は、単に `pattern` に含めなければよい（4 で許可される）。3 で適用する規則は**先頭でマッチしたエントリ**のもの（緩和設定がエントリごとに異なるため）。
 
-- **フェイルクローズ**: `files` 未設定／エントリが 1 つも有効でない／エントリに不正（`allow` の `**`・リスト・pattern 外）があると、対象言語のソース書き込みを **全て deny** する。エラー内容は reason に列挙されるので設定を修正する。
+- **フェイルクローズ**: `files` 未設定／エントリが 1 つも有効でない／エントリに不正（`allow` の `**`・リスト・pattern 外、`numbers`・`strings` が真偽でない、`ignore-context` がリストでない・語彙外、`min-occurrences` が 1 以上の整数でない）があると、対象言語のソース書き込みを **全て deny** する。エラー内容は reason に列挙されるので設定を修正する。
 - ファイルは PostToolUse 時点でディスク上にあるため、書き込んだ**ファイル全体**を解析する（当該編集箇所だけでなくファイル全体がハードコードフリーであることを求める）。
 
 ## 能動スキャン（`ai-harness-main --fire`）
@@ -147,7 +181,8 @@ ai-harness-constants/
     ├── ai-harness-constants.csproj
     ├── ConstantsPlugin.cs         PostToolUse の発火・能動スキャン・判定・reason 生成
     ├── ConstantsConfig.cs         設定の解釈とバリデーション
-    ├── LiteralDetector.cs         tree-sitter で AST 解析しリテラルを検出
+    ├── LiteralDetector.cs         tree-sitter で AST 解析しリテラルを検出（種別・文脈の絞り込み）
+    ├── OccurrenceFilter.cs        min-occurrences: 出現回数による絞り込み
     ├── DuplicateStringChecker.cs  same-string: allow 群を横断した文字列重複の検査
     ├── FireScanner.cs             能動スキャンの走査（fire.exclude / fire.gitignore）
     └── GlobMatcher.cs             ** 対応の glob 一致（directory-checker と同一）
