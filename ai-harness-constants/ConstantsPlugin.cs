@@ -51,6 +51,26 @@ public sealed class ConstantsPlugin : PluginBase
     private static readonly HashSet<string> TargetTools =
         new(StringComparer.Ordinal) { "Write", "Edit", "MultiEdit" };
 
+    /// <summary>
+    /// 雛形（<see cref="PluginBase.CopyDefaultConfig"/> が置く既定設定）のプレースホルダの目印。
+    /// これを含むエントリは「まだ実プロジェクトのパスへ書き換えていない」ことを意味するため、
+    /// 配置要求として宣言しない（設定前の状態で他プラグインの起動エラーを誘発させない）。
+    /// </summary>
+    private const string PlaceholderMarker = "__ai_harness_placeholder__";
+
+    /// <summary>
+    /// 各エントリの <c>allow</c>（ハードコード値を許可する定数ファイルの置き場所）を、このプラグインが
+    /// 要求する配置として宣言する。配置を検査するプラグインが自分の許可範囲と突き合わせ、覆えていなければ
+    /// 起動時にエラーを出す＝「定数ファイルを作った途端に別のプラグインへ弾かれる」状態を、
+    /// 書き込み時ではなく設定時点で露見させる。宣言が他プラグインの許可を広げることはない。
+    /// </summary>
+    public override IReadOnlyList<string> RequiredPaths =>
+        ConstantsConfig.Parse(Config).Entries
+            .Select(e => e.Allow)
+            .Where(allow => !allow.Contains(PlaceholderMarker, StringComparison.Ordinal))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
     /// <summary>reason に列挙する違反リテラルの最大件数。</summary>
     private const int MaxReported = 20;
 
