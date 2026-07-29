@@ -7,6 +7,8 @@
     <LangVersion>latest</LangVersion>
     <RootNamespace>ai_harness_constants</RootNamespace>
     <AssemblyName>ai-harness-constants</AssemblyName>
+    <Version>0.1.0</Version>
+    <InformationalVersion>0.1.0</InformationalVersion>
     <!-- NuGet 依存（TreeSitter.DotNet とネイティブ grammar）は lib/ へ同梱する必要があるため出力へコピーする。 -->
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
@@ -24,7 +26,9 @@
 
   <!-- .claude/rules へ配布する rule（CopyRule）と、有効化時に無ければ置くデフォルト設定（CopyDefaultConfig）。 -->
   <ItemGroup>
-    <EmbeddedResource Include="constants.rule.md" />
+    <EmbeddedResource Include="../resources/rules/constants.rule.md">
+      <LogicalName>rules/constants.rule.md</LogicalName>
+    </EmbeddedResource>
     <EmbeddedResource Include="constants.config.yml" />
   </ItemGroup>
 
